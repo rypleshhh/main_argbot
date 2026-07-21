@@ -1,0 +1,13 @@
+services:
+  bot2:
+    build:
+      context: .
+      dockerfile: Dockerfile.bot
+    restart: unless-stopped
+    env_file:
+      - .env.bot2
+    ports:
+      - "8081:8080"   # второй бот — свой порт снаружи (внутри контейнера всегда 8080);
+                       # сюда стучится скрапер по LIGHT_SERVER_URL_2
+    volumes:
+      - ./data-bot2:/app/data   # своя БД, отдельно от первого бота (./data)
