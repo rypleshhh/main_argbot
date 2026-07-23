@@ -41,8 +41,8 @@ IP. Поэтому направление связи развёрнуто: **с�
 Ему нужно начать слушать раньше, чем скрапер попробует достучаться.
 
 ```bash
-git clone https://github.com/ВАШ_ЮЗЕРНЕЙМ/ВАШ_РЕПО.git
-cd ВАШ_РЕПО
+git clone https://github.com/Rypleshhh/main_argbot
+cd main_argbot
 
 cp .env.bot.example .env.bot
 nano .env.bot
@@ -78,8 +78,8 @@ ufw enable
 ### 2. На мощном сервере (за NAT) — разворачиваем вторым
 
 ```bash
-git clone https://github.com/ВАШ_ЮЗЕРНЕЙМ/ВАШ_РЕПО.git
-cd ВАШ_РЕПО
+git clone https://github.com/Rypleshhh/main_argbot
+cd main_argbot
 
 cp app/geoboxes_local.py.example app/geoboxes_local.py
 nano app/geoboxes_local.py
