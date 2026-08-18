@@ -19,7 +19,7 @@ IP. Поэтому направление связи развёрнуто: **с�
     пользователей (`/scan_city`), и если есть — сканирует и отправляет
     результат через `POST {LIGHT_SERVER_URL}/command-result`
 
-- **Сервер-бот** (лёгкий, белый IP, за tgproxy) — Telegram-бот на
+- **Сервер-бот** (лёгкий, белый IP) — Telegram-бот на
   aiogram, без Chromium вообще. Держит небольшое HTTP API, в которое
   стучится скрапер, и просто передаёт данные в Telegram.
 
@@ -36,13 +36,13 @@ IP. Поэтому направление связи развёрнуто: **с�
 
 ## Установка
 
-### 1. На лёгком сервере (белый IP, с tgproxy) — разворачиваем первым
+### 1. На лёгком сервере (белый IP) — разворачиваем первым
 
 Ему нужно начать слушать раньше, чем скрапер попробует достучаться.
 
 ```bash
-git clone https://github.com/ВАШ_ЮЗЕРНЕЙМ/ВАШ_РЕПО.git
-cd ВАШ_РЕПО
+git clone https://github.com/Rypleshhh/main_argbot.git
+cd main_argbot
 
 cp .env.bot.example .env.bot
 nano .env.bot
@@ -78,8 +78,8 @@ ufw enable
 ### 2. На мощном сервере (за NAT) — разворачиваем вторым
 
 ```bash
-git clone https://github.com/ВАШ_ЮЗЕРНЕЙМ/ВАШ_РЕПО.git
-cd ВАШ_РЕПО
+git clone https://github.com/Rypleshhh/main_argbot.git
+cd main_argbot
 
 cp app/geoboxes_local.py.example app/geoboxes_local.py
 nano app/geoboxes_local.py
