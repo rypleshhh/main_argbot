@@ -1,0 +1,40 @@
+services:
+  bot2:
+    build:
+      context: .
+      dockerfile: Dockerfile.bot
+    restart: unless-stopped
+    env_file:
+      - .env.bot2
+    ports:
+      - "8081:8080"   # второй бот — свой порт снаружи (внутри контейнера всегда 8080);
+                       # сюда стучится скрапер по LIGHT_SERVER_URL_2
+                       # MINIAPP_PORT (8090) наружу НЕ пробрасываем — до него достаёт
+                       # только Caddy внутри docker-сети (по имени сервиса bot2), TLS
+                       # снаружи обязателен для Mini App, голый HTTP Telegram не примет.
+    volumes:
+      - ./data-bot2:/app/data   # своя БД, отдельно от первого бота (./data)
+
+  caddy:
+    build:
+      context: .
+      dockerfile: Dockerfile.caddy
+    restart: unless-stopped
+    depends_on:
+      - bot2
+    env_file:
+      - .env.bot2   # оттуда MINIAPP_DOMAIN, MINIAPP_HTTPS_PORT, DUCKDNS_TOKEN для Caddyfile
+    ports:
+      # 80/443 заняты xray/hysteria — Mini App слушает на отдельном порту.
+      # Если меняете порт — правьте ЗДЕСЬ и MINIAPP_HTTPS_PORT в .env.bot2
+      # ОДНОВРЕМЕННО (docker-compose не умеет подставлять .env.bot2 сюда,
+      # только в переменные самого контейнера).
+      - "8443:8443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data       # тут хранится выпущенный сертификат — не удалять при апдейтах
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:
