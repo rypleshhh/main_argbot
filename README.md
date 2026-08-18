@@ -41,6 +41,9 @@ IP. Поэтому направление связи развёрнуто: **с�
 Ему нужно начать слушать раньше, чем скрапер попробует достучаться.
 
 ```bash
+ВНИМАНИЕ КОМАНДА ДЛЯ КЛОНИРОВАНИЯ ПРИВАТА НЕ ЗАБЫТЬ УБРАТЬ!!!!
+git clone https://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@github.com/Rypleshhh/main_argbot.git
+
 git clone https://github.com/Rypleshhh/main_argbot.git
 cd main_argbot
 
