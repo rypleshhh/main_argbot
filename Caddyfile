@@ -10,6 +10,10 @@
 # входа, поле "token" вверху страницы.
 
 {$MINIAPP_DOMAIN}:{$MINIAPP_HTTPS_PORT} {
+	log {
+		output stdout
+		format json
+	}
 	tls {
 		dns duckdns {$DUCKDNS_TOKEN}
 	}
