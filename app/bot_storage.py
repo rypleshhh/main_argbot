@@ -49,13 +49,13 @@ CREATE TABLE IF NOT EXISTS access (
 CREATE TABLE IF NOT EXISTS station_catalog (
     station_id TEXT PRIMARY KEY,   -- это api_id станции у скрапера
     area TEXT NOT NULL,
+    brand TEXT NOT NULL DEFAULT 'Другое',  -- угадывается из названия, см. _guess_brand()
     name TEXT,
     address TEXT,
     lat REAL,
     lon REAL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-CREATE INDEX IF NOT EXISTS idx_station_catalog_area ON station_catalog(area);
 
 CREATE TABLE IF NOT EXISTS zones (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,7 +63,6 @@ CREATE TABLE IF NOT EXISTS zones (
     name TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-CREATE INDEX IF NOT EXISTS idx_zones_chat ON zones(chat_id);
 
 CREATE TABLE IF NOT EXISTS zone_stations (
     zone_id INTEGER NOT NULL,
@@ -85,6 +84,18 @@ CREATE TABLE IF NOT EXISTS command_results (
     stations_json TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+"""
+
+# Индексы — ОТДЕЛЬНО от SCHEMA и выполняются ПОСЛЕ миграций (_ensure_column
+# в init_db). Причина: CREATE TABLE IF NOT EXISTS не трогает уже существующую
+# старую таблицу, и если индекс из SCHEMA ссылается на столбец, которого в
+# ней ещё нет (например, brand — добавлен позже commands.session_id), это
+# падает с "no such column" на любой БД старее этого поля.
+INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_station_catalog_area ON station_catalog(area);
+CREATE INDEX IF NOT EXISTS idx_station_catalog_brand ON station_catalog(brand);
+CREATE INDEX IF NOT EXISTS idx_station_catalog_address ON station_catalog(address);
+CREATE INDEX IF NOT EXISTS idx_zones_chat ON zones(chat_id);
 """
 
 # Формат хранения дат в таблице access — фиксированная ширина, чтобы
@@ -152,6 +163,12 @@ def init_db():
         # мультиобластного скана зоны добавляется миграцией, не в SCHEMA
         # (там уже была бы ошибка "duplicate column" при повторных запусках).
         _ensure_column(conn, "commands", "session_id", "INTEGER")
+        # station_catalog появился раньше поля brand (фильтр по фирме в
+        # Mini App) — у старых строк будет NULL до следующего пуша от
+        # скрапера (sync_station_catalog полностью перезаписывает область).
+        _ensure_column(conn, "station_catalog", "brand", "TEXT")
+        # Индексы — после миграций, см. комментарий у INDEXES выше.
+        conn.executescript(INDEXES)
         conn.commit()
 
 
@@ -353,6 +370,29 @@ def get_coins(chat_id: int) -> int:
 # «Добавить зону» (браузер станций).
 # ---------------------------------------------------------------------
 
+# Известные сети АЗС в России — используется, чтобы угадать бренд по
+# названию станции (сырые данные с sberazs бренд отдельным полем не
+# дают). Порядок важен: более длинные/специфичные названия проверяются
+# раньше коротких, чтобы "Газпромнефть" не схлопнулась в "Газпром".
+_KNOWN_BRANDS = [
+    "Газпромнефть", "Роснефть", "Лукойл", "Башнефть", "Татнефть",
+    "Сургутнефтегаз", "Русснефть", "Славнефть", "Трасса", "Несте", "Neste",
+    "Shell", "Газпром", "ТНС", "ТЗК", "Fas-Trade", "Fas Trade",
+    "Трансервис", "Нефтьмагистраль", "Экто", "ЕКА", "Икс", "Питер",
+    "Роснефть-Ойл",
+]
+
+
+def _guess_brand(name: Optional[str]) -> str:
+    if not name:
+        return "Другое"
+    lowered = name.lower()
+    for brand in _KNOWN_BRANDS:
+        if brand.lower() in lowered:
+            return brand
+    return "Другое"
+
+
 def sync_station_catalog(area: str, stations: list[dict]):
     """stations: [{'station_id', 'name', 'address', 'lat', 'lon'}, ...]
     Полностью заменяет карточки станций этой области — если станция
@@ -363,15 +403,17 @@ def sync_station_catalog(area: str, stations: list[dict]):
         for s in stations:
             sid = s["station_id"]
             seen_ids.append(sid)
+            name = s.get("name")
             conn.execute(
                 """
-                INSERT INTO station_catalog (station_id, area, name, address, lat, lon, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                INSERT INTO station_catalog (station_id, area, brand, name, address, lat, lon, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
                 ON CONFLICT(station_id) DO UPDATE SET
-                    area=excluded.area, name=excluded.name, address=excluded.address,
-                    lat=excluded.lat, lon=excluded.lon, updated_at=excluded.updated_at
+                    area=excluded.area, brand=excluded.brand, name=excluded.name,
+                    address=excluded.address, lat=excluded.lat, lon=excluded.lon,
+                    updated_at=excluded.updated_at
                 """,
-                (sid, area, s.get("name"), s.get("address"), s.get("lat"), s.get("lon")),
+                (sid, area, _guess_brand(name), name, s.get("address"), s.get("lat"), s.get("lon")),
             )
         if seen_ids:
             placeholders = ",".join("?" * len(seen_ids))
@@ -393,10 +435,44 @@ def get_catalog_areas() -> list[str]:
 def get_catalog_stations(area: str) -> list[dict]:
     with closing(_connect()) as conn:
         rows = conn.execute(
-            "SELECT station_id, area, name, address, lat, lon FROM station_catalog "
+            "SELECT station_id, area, brand, name, address, lat, lon FROM station_catalog "
             "WHERE area = ? ORDER BY name",
             (area,),
         ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_catalog_brands() -> list[dict]:
+    """Список брендов по всему каталогу (по всем областям сразу),
+    отсортированный по популярности — для панели фильтра «Фирма»."""
+    with closing(_connect()) as conn:
+        rows = conn.execute(
+            "SELECT COALESCE(brand, 'Другое') AS brand, COUNT(*) AS count "
+            "FROM station_catalog GROUP BY brand ORDER BY count DESC, brand"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def search_catalog_stations(query: str = "", brands: Optional[list[str]] = None, limit: int = 60) -> list[dict]:
+    """Поиск станций ПО ВСЕМУ каталогу (не привязан к одной области) —
+    для экрана «Добавить зону»: текст ищется в адресе и названии,
+    опционально фильтр по списку брендов. limit защищает от выгрузки
+    всего каталога разом, если запрос слишком широкий."""
+    sql = "SELECT station_id, area, brand, name, address, lat, lon FROM station_catalog WHERE 1=1"
+    params: list = []
+    q = (query or "").strip()
+    if q:
+        sql += " AND (address LIKE ? OR name LIKE ?)"
+        like = f"%{q}%"
+        params += [like, like]
+    if brands:
+        placeholders = ",".join("?" * len(brands))
+        sql += f" AND COALESCE(brand, 'Другое') IN ({placeholders})"
+        params += list(brands)
+    sql += " ORDER BY name LIMIT ?"
+    params.append(limit)
+    with closing(_connect()) as conn:
+        rows = conn.execute(sql, params).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -407,11 +483,27 @@ def get_stations_by_ids(station_ids: list[str]) -> dict[str, dict]:
     with closing(_connect()) as conn:
         placeholders = ",".join("?" * len(station_ids))
         rows = conn.execute(
-            f"SELECT station_id, area, name, address, lat, lon FROM station_catalog "
+            f"SELECT station_id, area, brand, name, address, lat, lon FROM station_catalog "
             f"WHERE station_id IN ({placeholders})",
             station_ids,
         ).fetchall()
     return {r["station_id"]: dict(r) for r in rows}
+
+
+def get_zone_owners_for_station(station_id: str) -> list[int]:
+    """chat_id всех, у кого эта станция сохранена в какой-либо зоне —
+    используется для автоматических оповещений по зонам (см.
+    handle_notifications в light_bot.py): владелец зоны не должен
+    отдельно оформлять area+category подписку, чтобы получать
+    уведомления по своим станциям."""
+    with closing(_connect()) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT z.chat_id FROM zones z "
+            "JOIN zone_stations zs ON zs.zone_id = z.id "
+            "WHERE zs.station_id = ?",
+            (station_id,),
+        ).fetchall()
+    return [r["chat_id"] for r in rows]
 
 
 # ---------------------------------------------------------------------

@@ -217,15 +217,39 @@ async def handle_catalog_areas(request: web.Request):
 
 
 async def handle_catalog_stations(request: web.Request):
+    """Оставлено для обратной совместимости — станции одной конкретной
+    области. Основной сценарий фронтенда теперь handle_catalog_search
+    (по всему каталогу сразу, без привязки к области)."""
     area = request.query.get("area")
     if not area:
         return web.json_response({"error": "area query param required"}, status=400)
     return web.json_response({"stations": storage.get_catalog_stations(area)})
 
 
+async def handle_catalog_brands(request: web.Request):
+    """Бренды по всему каталогу, отсортированные по популярности — для
+    панели фильтра «Фирма»."""
+    return web.json_response({"brands": storage.get_catalog_brands()})
+
+
+async def handle_catalog_search(request: web.Request):
+    """Поиск станций ПО ВСЕЙ базе (не привязан к одной области) — текст
+    ищется в адресе/названии, plus необязательный фильтр по брендам
+    (?brand=Роснефть&brand=Лукойл, можно несколько раз). Список станций
+    ограничен разумным лимитом — если ищут совсем без q и без брендов,
+    просим уточнить, чтобы не гонять на телефон весь каталог разом."""
+    query = request.query.get("q", "").strip()
+    brands = request.query.getall("brand", [])
+    if not query and not brands:
+        return web.json_response({"stations": [], "hint": "уточните поиск или выберите фирму"})
+    stations = storage.search_catalog_stations(query=query, brands=brands or None, limit=100)
+    return web.json_response({"stations": stations})
+
+
 async def handle_list_zones(request: web.Request):
     chat_id = request["miniapp_chat_id"]
     return web.json_response({"zones": storage.list_zones(chat_id)})
+
 
 
 async def handle_create_zone(request: web.Request):
@@ -384,6 +408,8 @@ def build_miniapp_app() -> web.Application:
     app.router.add_get("/api/scan-sessions/{session_id}", handle_scan_session)
 
     app.router.add_get("/api/catalog/areas", handle_catalog_areas)
+    app.router.add_get("/api/catalog/brands", handle_catalog_brands)
+    app.router.add_get("/api/catalog/search", handle_catalog_search)
     app.router.add_get("/api/catalog", handle_catalog_stations)
     app.router.add_get("/api/zones", handle_list_zones)
     app.router.add_post("/api/zones", handle_create_zone)

@@ -549,6 +549,7 @@ async def handle_notifications(request: web.Request):
 
     for upd in updates:
         area = upd.get("area", "")
+        station_id = upd.get("api_id", "")
 
         resumed = json.loads(upd.get("resumed_fuels_json") or "[]")
         categories = {f.get("category", "other") for f in resumed}
@@ -560,6 +561,11 @@ async def handle_notifications(request: web.Request):
         chat_ids = set()
         for cat in categories:
             chat_ids.update(storage.get_subscribers_for_area(area, cat))
+        # + владельцы зон, в которые сохранена ИМЕННО эта станция — зона
+        # это подписка на конкретные заправки, без разбивки по категории
+        # топлива (проще для пользователя: "оповести меня про мои АЗС").
+        if station_id:
+            chat_ids.update(storage.get_zone_owners_for_station(station_id))
         # Уведомления — только по оплаченной подписке. Триал даёт доступ
         # к сканам/оформлению подписки (см. _require_access), но НЕ к
         # реальной рассылке — иначе платный тариф не имел бы смысла.

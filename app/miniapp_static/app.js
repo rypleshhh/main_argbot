@@ -146,7 +146,7 @@ function pollScanSession(sessionId, resultEl) {
         if (Date.now() - startedAt < 90000) {
           setTimeout(tick, 3000);
         } else {
-          resultEl.insertAdjacentHTML("beforeend", '<div class="hint">Скрапер долго отвечает, откройте вкладку заново позже.</div>');
+          resultEl.insertAdjacentHTML("beforeend", '<div class="hint">Данные долго не приходят, откройте вкладку заново позже.</div>');
         }
       }
     } catch (e) {
@@ -160,7 +160,7 @@ function renderScanResult(data, resultEl) {
   resultEl.innerHTML = data.areas
     .map(function (a) {
       if (a.status !== "done") {
-        return '<div class="area-block"><h3>' + escapeHtml(a.area) + '</h3><div class="hint">⏳ ждём скрапер…</div></div>';
+        return '<div class="area-block"><h3>' + escapeHtml(a.area) + '</h3><div class="hint">⏳ идёт сканирование…</div></div>';
       }
       const stations = a.stations || [];
       const list = stations.length
@@ -181,57 +181,75 @@ function renderScanResult(data, resultEl) {
 // ---------------------------------------------------------------------
 
 let zonesCache = [];
+let selectedBrands = [];
+let searchDebounceTimer = null;
 
 async function renderZones() {
   screenEl.innerHTML = '<div class="loading">Загрузка…</div>';
   try {
-    const [zonesRes, areasRes] = await Promise.all([api("/zones"), api("/catalog/areas")]);
+    const zonesRes = await api("/zones");
     zonesCache = zonesRes.zones;
-
-    const zonesHtml =
-      zonesCache
-        .map(function (z) {
-          return (
-            '<div class="list-item-row"><span>🗂 ' + escapeHtml(z.name) +
-            ' <span class="hint">(' + z.station_count + ')</span></span>' +
-            '<button class="icon-btn" data-open-zone="' + z.id + '">Открыть</button>' +
-            '<button class="icon-btn danger" data-del-zone="' + z.id + '">✕</button></div>'
-          );
-        })
-        .join("") || '<div class="empty">Зон ещё нет</div>';
-
-    const areaOptions = areasRes.areas
-      .map(function (a) {
-        return '<option value="' + escapeHtml(a) + '">' + escapeHtml(a) + "</option>";
-      })
-      .join("");
+    selectedBrands = [];
 
     screenEl.innerHTML =
       "<section><h2>Мои зоны</h2>" +
-      '<div class="list" id="zones-list">' + zonesHtml + "</div>" +
+      '<div class="list" id="zones-list">' + renderZonesListHtml() + "</div>" +
       '<div class="row"><input id="new-zone-name" placeholder="Название новой зоны" maxlength="100">' +
       '<button id="create-zone-btn" class="primary-btn" style="margin-top:0;width:auto">Создать</button></div>' +
       "</section>" +
       "<section><h2>Добавить заправку в зону</h2>" +
-      '<select id="area-select"><option value="">— выберите область —</option>' + areaOptions + "</select>" +
+      '<div class="row">' +
+      '<input id="station-search" placeholder="Поиск по адресу или названию (например: Москва)">' +
+      '<button id="brand-filter-btn" class="secondary-btn" style="margin-top:0;width:auto">Фирма</button>' +
+      "</div>" +
       '<div id="stations-list" class="list" style="margin-top:10px"></div>' +
       "</section>";
 
+    bindZonesListEvents();
     document.getElementById("create-zone-btn").addEventListener("click", createZoneFlow);
-    screenEl.querySelectorAll("[data-del-zone]").forEach(function (b) {
-      b.addEventListener("click", function () {
-        deleteZoneFlow(Number(b.dataset.delZone));
-      });
+    document.getElementById("brand-filter-btn").addEventListener("click", openBrandFilter);
+    document.getElementById("station-search").addEventListener("input", function (e) {
+      clearTimeout(searchDebounceTimer);
+      const value = e.target.value;
+      searchDebounceTimer = setTimeout(function () {
+        runStationSearch(value);
+      }, 350);
     });
-    screenEl.querySelectorAll("[data-open-zone]").forEach(function (b) {
-      b.addEventListener("click", function () {
-        openZoneFlow(Number(b.dataset.openZone));
-      });
-    });
-    document.getElementById("area-select").addEventListener("change", onAreaSelect);
+
+    // Пока ничего не искали и фирма не выбрана — список пуст с подсказкой.
+    document.getElementById("stations-list").innerHTML =
+      '<div class="empty">Начните вводить адрес/название или выберите «Фирма»</div>';
   } catch (e) {
     screenEl.innerHTML = '<div class="error">' + escapeHtml(e.message) + "</div>";
   }
+}
+
+function renderZonesListHtml() {
+  return (
+    zonesCache
+      .map(function (z) {
+        return (
+          '<div class="list-item-row"><span>🗂 ' + escapeHtml(z.name) +
+          ' <span class="hint">(' + z.station_count + ')</span></span>' +
+          '<button class="icon-btn" data-open-zone="' + z.id + '">Открыть</button>' +
+          '<button class="icon-btn danger" data-del-zone="' + z.id + '">✕</button></div>'
+        );
+      })
+      .join("") || '<div class="empty">Зон ещё нет</div>'
+  );
+}
+
+function bindZonesListEvents() {
+  screenEl.querySelectorAll("[data-del-zone]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      deleteZoneFlow(Number(b.dataset.delZone));
+    });
+  });
+  screenEl.querySelectorAll("[data-open-zone]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      openZoneFlow(Number(b.dataset.openZone));
+    });
+  });
 }
 
 async function createZoneFlow() {
@@ -257,6 +275,10 @@ async function deleteZoneFlow(zoneId) {
 }
 
 async function openZoneFlow(zoneId) {
+  const zone = zonesCache.find(function (z) {
+    return z.id === zoneId;
+  });
+  const zoneName = zone ? zone.name : "";
   try {
     const res = await api("/zones/" + zoneId + "/stations");
     const list =
@@ -273,7 +295,7 @@ async function openZoneFlow(zoneId) {
     const modal = document.createElement("div");
     modal.className = "modal";
     modal.innerHTML =
-      '<div class="modal-content"><h3>Станции в зоне</h3><div class="list">' + list + "</div>" +
+      '<div class="modal-content"><h3>🗂 ' + escapeHtml(zoneName) + '</h3><div class="list">' + list + "</div>" +
       '<button class="secondary-btn" id="close-modal">Закрыть</button></div>';
     document.body.appendChild(modal);
 
@@ -292,57 +314,123 @@ async function openZoneFlow(zoneId) {
   }
 }
 
-async function onAreaSelect(e) {
-  const area = e.target.value;
+// ---- Поиск станций по всей базе + фильтр по фирме ----
+
+async function openBrandFilter() {
+  const panel = document.createElement("div");
+  panel.className = "modal";
+  panel.innerHTML = '<div class="modal-content"><h3>Фирма</h3><div class="loading">Загрузка…</div></div>';
+  document.body.appendChild(panel);
+
+  try {
+    const res = await api("/catalog/brands");
+    const content = panel.querySelector(".modal-content");
+    const rows = res.brands
+      .map(function (b, i) {
+        const checked = selectedBrands.indexOf(b.brand) !== -1 ? "checked" : "";
+        return (
+          '<label class="list-item-row"><span>' + (i + 1) + ". " + escapeHtml(b.brand) +
+          ' <span class="hint">(' + b.count + ")</span></span>" +
+          '<input type="checkbox" data-brand="' + escapeHtml(b.brand) + '" ' + checked + "></label>"
+        );
+      })
+      .join("") || '<div class="empty">Каталог станций пока пуст</div>';
+
+    content.innerHTML =
+      "<h3>Фирма</h3>" +
+      '<div class="hint" style="margin-bottom:8px">Отсортировано по популярности</div>' +
+      '<div class="list">' + rows + "</div>" +
+      '<button class="secondary-btn" id="clear-brands">Сбросить</button>' +
+      '<button class="primary-btn" id="apply-brands">Применить</button>';
+
+    content.querySelector("#clear-brands").addEventListener("click", function () {
+      selectedBrands = [];
+      panel.remove();
+      runStationSearch(document.getElementById("station-search").value);
+    });
+    content.querySelector("#apply-brands").addEventListener("click", function () {
+      selectedBrands = Array.prototype.map
+        .call(content.querySelectorAll("[data-brand]:checked"), function (cb) {
+          return cb.dataset.brand;
+        });
+      panel.remove();
+      runStationSearch(document.getElementById("station-search").value);
+    });
+  } catch (e) {
+    panel.querySelector(".modal-content").innerHTML = '<div class="error">' + escapeHtml(e.message) + "</div>";
+  }
+}
+
+async function runStationSearch(query) {
   const listEl = document.getElementById("stations-list");
-  if (!area) {
-    listEl.innerHTML = "";
+  if (!listEl) return; // экран уже мог смениться, пока ждали дебаунс
+
+  const q = (query || "").trim();
+  if (!q && selectedBrands.length === 0) {
+    listEl.innerHTML = '<div class="empty">Начните вводить адрес/название или выберите «Фирма»</div>';
     return;
   }
-  listEl.innerHTML = '<div class="loading">Загрузка…</div>';
+
+  listEl.innerHTML = '<div class="loading">Ищу…</div>';
   try {
-    const res = await api("/catalog?area=" + encodeURIComponent(area));
-    const zoneOptions = zonesCache
-      .map(function (z) {
-        return '<option value="' + z.id + '">' + escapeHtml(z.name) + "</option>";
-      })
-      .join("");
-
-    listEl.innerHTML =
-      res.stations
-        .map(function (s) {
-          return (
-            '<div class="list-item-row"><span>⛽️ ' + escapeHtml(s.name) +
-            ' <span class="hint">' + escapeHtml(s.address || "") + "</span></span>" +
-            '<select data-add-station="' + escapeHtml(s.station_id) + '"><option value="">+ в зону…</option>' +
-            zoneOptions + "</select></div>"
-          );
-        })
-        .join("") || '<div class="empty">Станции в этой области ещё не известны</div>';
-
-    listEl.querySelectorAll("[data-add-station]").forEach(function (sel) {
-      sel.addEventListener("change", async function (ev) {
-        const zoneId = ev.target.value;
-        if (!zoneId) return;
-        try {
-          await api("/zones/" + zoneId + "/stations", {
-            method: "POST",
-            body: JSON.stringify({ station_id: sel.dataset.addStation }),
-          });
-          const row = sel.closest(".list-item-row");
-          row.classList.add("flash-ok");
-          setTimeout(function () {
-            row.classList.remove("flash-ok");
-          }, 700);
-          ev.target.value = "";
-        } catch (err) {
-          alert(err.message);
-        }
-      });
+    const params = new URLSearchParams();
+    if (q) params.set("q", q);
+    selectedBrands.forEach(function (b) {
+      params.append("brand", b);
     });
+    const res = await api("/catalog/search?" + params.toString());
+    renderStationSearchResults(res.stations, listEl);
   } catch (e) {
     listEl.innerHTML = '<div class="error">' + escapeHtml(e.message) + "</div>";
   }
+}
+
+function renderStationSearchResults(stations, listEl) {
+  const zoneOptions = zonesCache
+    .map(function (z) {
+      return '<option value="' + z.id + '">' + escapeHtml(z.name) + "</option>";
+    })
+    .join("");
+
+  if (!zonesCache.length) {
+    listEl.innerHTML = '<div class="empty">Сначала создайте зону выше, потом добавляйте в неё станции</div>';
+    return;
+  }
+
+  listEl.innerHTML =
+    stations
+      .map(function (s) {
+        return (
+          '<div class="list-item-row"><span>⛽️ ' + escapeHtml(s.brand ? s.brand + " — " : "") + escapeHtml(s.name) +
+          ' <span class="hint">' + escapeHtml(s.address || "") + "</span></span>" +
+          '<select data-add-station="' + escapeHtml(s.station_id) + '"><option value="">+ в зону…</option>' +
+          zoneOptions + "</select></div>"
+        );
+      })
+      .join("") || '<div class="empty">Ничего не найдено</div>';
+
+  listEl.querySelectorAll("[data-add-station]").forEach(function (sel) {
+    sel.addEventListener("change", async function (ev) {
+      const zoneId = ev.target.value;
+      if (!zoneId) return;
+      try {
+        await api("/zones/" + zoneId + "/stations", {
+          method: "POST",
+          body: JSON.stringify({ station_id: sel.dataset.addStation }),
+        });
+        const row = sel.closest(".list-item-row");
+        row.classList.add("flash-ok");
+        setTimeout(function () {
+          row.classList.remove("flash-ok");
+        }, 700);
+        ev.target.value = "";
+        // Счётчик станций в зоне на экране мог устареть — подтянем при
+        // следующем заходе на вкладку, здесь не критично.
+      } catch (err) {
+        alert(err.message);
+      }
+    });
+  });
 }
 
 // ---------------------------------------------------------------------
@@ -352,25 +440,74 @@ async function onAreaSelect(e) {
 async function renderAlerts() {
   screenEl.innerHTML = '<div class="loading">Загрузка…</div>';
   try {
-    const res = await api("/subscriptions");
-    const list =
-      res.subscriptions
+    const [subsRes, zonesRes, areasRes] = await Promise.all([
+      api("/subscriptions"),
+      api("/zones"),
+      api("/catalog/areas"),
+    ]);
+
+    const zonesHtml =
+      zonesRes.zones
+        .map(function (z) {
+          return (
+            '<div class="list-item-row"><span>🗂 ' + escapeHtml(z.name) +
+            ' <span class="hint">(' + z.station_count + " АЗС)</span></span>" +
+            '<span class="hint">авто ✅</span></div>'
+          );
+        })
+        .join("") || '<div class="empty">Зон нет — создайте на вкладке «Добавить зону», и они появятся тут автоматически</div>';
+
+    const subsHtml =
+      subsRes.subscriptions
         .map(function (s) {
           const areaLabel = s.area === "all" ? "🌍 все области" : "📍 " + escapeHtml(s.area);
           return '<div class="list-item-row"><span>' + areaLabel + " — " + (CATEGORY_LABELS[s.category] || s.category) + "</span></div>";
         })
-        .join("") || '<div class="empty">Подписок пока нет — оформите на вкладке «Сканировать»</div>';
+        .join("") || '<div class="empty">Подписок по областям пока нет</div>';
+
+    const areaOptions = areasRes.areas
+      .map(function (a) {
+        return '<option value="' + escapeHtml(a) + '">' + escapeHtml(a) + "</option>";
+      })
+      .join("");
 
     screenEl.innerHTML =
-      "<section><h2>Мои оповещения</h2>" +
-      '<div class="list">' + list + "</div>" +
-      (res.subscriptions.length ? '<button id="unsub-all-btn" class="danger-btn">Отказаться от всех</button>' : "") +
+      "<section><h2>Мои зоны</h2>" +
+      '<div class="hint" style="margin-bottom:6px">Оповещения по своим заправкам приходят автоматически, отдельно подписываться не нужно</div>' +
+      '<div class="list">' + zonesHtml + "</div>" +
+      "</section>" +
+      "<section><h2>Подписка по области</h2>" +
+      '<div class="list">' + subsHtml + "</div>" +
+      '<div class="row">' +
+      '<select id="sub-area"><option value="all">🌍 все области</option>' + areaOptions + "</select>" +
+      '<select id="sub-category">' +
+      '<option value="all">всё</option><option value="petrol">бензин</option>' +
+      '<option value="diesel">дизель</option><option value="gas">газ</option>' +
+      "</select>" +
+      "</div>" +
+      '<button id="add-sub-btn" class="primary-btn">Подписаться</button>' +
+      (subsRes.subscriptions.length ? '<button id="unsub-all-btn" class="danger-btn">Отказаться от всех подписок по области</button>' : "") +
       "</section>";
 
-    const btn = document.getElementById("unsub-all-btn");
-    if (btn) {
-      btn.addEventListener("click", async function () {
-        if (!confirm("Отписаться от всех уведомлений?")) return;
+    document.getElementById("add-sub-btn").addEventListener("click", async function () {
+      const area = document.getElementById("sub-area").value;
+      const category = document.getElementById("sub-category").value;
+      try {
+        await api("/subscriptions", { method: "POST", body: JSON.stringify({ area: area, category: category }) });
+        renderAlerts();
+      } catch (e) {
+        if (e.data && e.data.error === "no_access") {
+          alert("Нужна активная подписка на тариф — откройте вкладку «Тариф»");
+        } else {
+          alert(e.message);
+        }
+      }
+    });
+
+    const unsubBtn = document.getElementById("unsub-all-btn");
+    if (unsubBtn) {
+      unsubBtn.addEventListener("click", async function () {
+        if (!confirm("Отписаться от всех подписок по области? Зоны это не затронет.")) return;
         await api("/subscriptions", { method: "DELETE" });
         renderAlerts();
       });
@@ -440,9 +577,16 @@ async function renderTariff() {
 // ---------------------------------------------------------------------
 
 if (!initData) {
+  const tgPresent = !!window.Telegram;
+  const waPresent = !!tg;
+  const diag =
+    "Telegram JS SDK: " + (tgPresent ? "загрузился" : "НЕ загрузился") +
+    " · WebApp объект: " + (waPresent ? "есть" : "нет") +
+    (waPresent ? " · версия клиента: " + (tg.version || "?") + " · платформа: " + (tg.platform || "?") : "");
   document.body.insertAdjacentHTML(
     "afterbegin",
-    '<div class="warn-banner">⚠️ Открой это приложение через кнопку в Telegram-боте — вне Telegram оно не авторизуется.</div>'
+    '<div class="warn-banner">⚠️ Открой это приложение через кнопку в Telegram-боте — вне Telegram оно не авторизуется.' +
+      '<br><span style="opacity:.7;font-size:11px">' + escapeHtml(diag) + "</span></div>"
   );
 }
 
