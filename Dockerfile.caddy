@@ -1,0 +1,10 @@
+# Стандартный caddy:2-alpine не умеет DNS-01 challenge через DuckDNS —
+# нужен плагин, собираем через xcaddy. Из-за этого Caddy НЕ требует
+# портов 80/443 вообще: подтверждение владения доменом идёт через DNS
+# (TXT-запись у DuckDNS), а не через HTTP/TLS challenge на стандартных
+# портах — свободно уживается с xray/hysteria на 443.
+FROM caddy:2-builder-alpine AS builder
+RUN xcaddy build --with github.com/caddy-dns/duckdns
+
+FROM caddy:2-alpine
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy
