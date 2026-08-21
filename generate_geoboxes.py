@@ -70,7 +70,7 @@ REGIONS = [
 ]
 
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
-USER_AGENT = "sberazs-bot-geobox-generator/1.0 (одноразовый скрипт, см. generate_geoboxes.py)"
+USER_AGENT = "sberazs-bot-geobox-generator/1.0"
 
 
 def fetch_bbox(region_name: str):
