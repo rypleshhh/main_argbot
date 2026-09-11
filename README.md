@@ -19,7 +19,7 @@ IP. Поэтому направление связи развёрнуто: **с�
     пользователей (`/scan_city`), и если есть — сканирует и отправляет
     результат через `POST {LIGHT_SERVER_URL}/command-result`
 
-- **Сервер-бот** (лёгкий, белый IP, за tgproxy) — Telegram-бот на
+- **Сервер-бот** (лёгкий, белый IP) — Telegram-бот на
   aiogram, без Chromium вообще. Держит небольшое HTTP API, в которое
   стучится скрапер, и просто передаёт данные в Telegram.
 
@@ -41,8 +41,8 @@ IP. Поэтому направление связи развёрнуто: **с�
 Ему нужно начать слушать раньше, чем скрапер попробует достучаться.
 
 ```bash
-git clone https://github.com/ВАШ_ЮЗЕРНЕЙМ/ВАШ_РЕПО.git
-cd ВАШ_РЕПО
+git clone https://github.com/Rypleshhh/main_argbot
+cd main_argbot
 
 cp .env.bot.example .env.bot
 nano .env.bot
@@ -78,8 +78,8 @@ ufw enable
 ### 2. На мощном сервере (за NAT) — разворачиваем вторым
 
 ```bash
-git clone https://github.com/ВАШ_ЮЗЕРНЕЙМ/ВАШ_РЕПО.git
-cd ВАШ_РЕПО
+git clone https://github.com/Rypleshhh/main_argbot
+cd main_argbot
 
 cp app/geoboxes_local.py.example app/geoboxes_local.py
 nano app/geoboxes_local.py
@@ -294,12 +294,12 @@ Telegram WebApp `initData`: каждый запрос фронтенда к `/ap
 
 Telegram требует настоящий https для Mini App — самоподписанный
 сертификат не подойдёт. Если бы порты 80/443 были свободны, Caddy мог
-бы получить сертификат прямо на них (HTTP-01 challenge). Но раз там уже
+бы получить сертификат прямо на них (HTTP-01 challenge). Но у меня стояли
 xray/hysteria — используем **DNS-01 challenge через DuckDNS API**:
 подтверждение домена идёт через DNS (TXT-запись), никакие порты для
 самого выпуска сертификата не нужны. Caddy слушает на отдельном порту
 (`MINIAPP_HTTPS_PORT`, по умолчанию `8443`), 80/443 остаются полностью
-у ваших xray/hysteria — Caddy их вообще не трогает и не открывает.
+у xray/hysteria — Caddy их вообще не трогает и не открывает.
 
 Для DNS-01 через DuckDNS собирается кастомный образ Caddy с плагином
 (`Dockerfile.caddy`, стандартный `caddy:2-alpine` этого не умеет).
