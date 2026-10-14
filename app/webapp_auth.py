@@ -53,14 +53,14 @@ def validate_init_data(init_data: str, bot_token: str, max_age_sec: int = MAX_AU
     if not hmac.compare_digest(computed_hash, received_hash):
         raise InitDataError("signature mismatch")
 
-    auth_date = pairs.get("auth_date")
-    if auth_date:
-        try:
-            age = time.time() - int(auth_date)
-        except ValueError:
-            age = None
-        if age is not None and age > max_age_sec:
-            raise InitDataError("init_data expired")
+    # Без auth_date возраст не проверить — такую строку не принимаем,
+    # иначе она жила бы вечно.
+    try:
+        age = time.time() - int(pairs["auth_date"])
+    except (KeyError, ValueError):
+        raise InitDataError("missing or bad auth_date")
+    if age > max_age_sec:
+        raise InitDataError("init_data expired")
 
     result = dict(pairs)
     if "user" in result:

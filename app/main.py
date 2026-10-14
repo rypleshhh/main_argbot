@@ -13,8 +13,10 @@ log = logging.getLogger(__name__)
 
 
 async def notify_loop():
-    """Раз в 30 сек проверяет очередь уведомлений и рассылает подписчикам."""
-    last_id = 0
+    """Раз в 30 сек проверяет очередь уведомлений и рассылает подписчикам.
+    Начинаем с текущего конца очереди — иначе после каждого перезапуска
+    подписчики заново получали бы всю историю уведомлений."""
+    last_id = storage.get_max_notification_id()
     while True:
         try:
             updates = storage.get_notifications_after(last_id)

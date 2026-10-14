@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timedelta, timezone
+from html import escape
 
 from app.storage import FUEL_LABELS, FUEL_STATUS_LABELS
 from app.gdebenz_client import GDEBENZ_STATUS_LABELS
@@ -39,9 +40,9 @@ def _format_fuel_line(fuel: dict, since_map: dict) -> str:
     label = FUEL_LABELS.get(ftype, ftype)
     status = fuel.get("availabilityStatus", "unknown")
     status_label = FUEL_STATUS_LABELS.get(status, status)
-    line = f"  • {label}: {status_label}"
+    line = f"  • {escape(str(label))}: {escape(str(status_label))}"
     if fuel.get("limitLiters"):
-        line += f" (лимит {fuel['limitLiters']} л)"
+        line += f" (лимит {escape(str(fuel['limitLiters']))} л)"
     since = since_map.get(ftype)
     if since:
         line += f"\n    ⏱ доступно с {format_payment_time(since)}"
@@ -70,7 +71,7 @@ def _format_tbank_line(tbank_json: str | None) -> str:
     label = TBANK_STATUS_LABELS.get(status, status)
     confidence = t.get("confidence")
     conf_text = f" ({round(confidence * 100)}%)" if confidence is not None else ""
-    return f"\n🏦 T-Bank подтверждает: {label}{conf_text}"
+    return f"\n🏦 T-Bank подтверждает: {escape(str(label))}{conf_text}"
 
 
 def _format_gdebenz_line(gdebenz_json: str | None) -> str:
@@ -85,7 +86,15 @@ def _format_gdebenz_line(gdebenz_json: str | None) -> str:
 
     status = g.get("status", "")
     label = GDEBENZ_STATUS_LABELS.get(status, status or "нет данных")
-    return f"\n🚗 gdebenz (отметки водителей): {label}"
+    return f"\n🚗 gdebenz (отметки водителей): {escape(str(label))}"
+
+
+def _format_header(st: dict) -> str:
+    """Название + адрес — данные сторонних API, экранируем под parse_mode=HTML."""
+    return (
+        f"⛽ <b>{escape(st.get('name') or 'Без названия')}</b>\n"
+        f"📍 {escape(st.get('address') or '—')}"
+    )
 
 
 def format_station(st: dict) -> str:
@@ -101,8 +110,7 @@ def format_station(st: dict) -> str:
     ops_line = f"\n👥 Заправились за последнее время: {ops}" if ops else ""
 
     return (
-        f"⛽ <b>{st.get('name') or 'Без названия'}</b>\n"
-        f"📍 {st.get('address') or '—'}\n"
+        f"{_format_header(st)}\n"
         f"🛢 Топливо:\n{fuels_block}"
         f"{ops_line}\n"
         f"🕒 Последняя оплата: {format_payment_time(st.get('last_payment_at'))}"
@@ -121,9 +129,9 @@ def format_resumption(st: dict) -> str:
 
     labels = []
     for f in resumed:
-        label = FUEL_LABELS.get(f.get("type"), f.get("type"))
+        label = escape(str(FUEL_LABELS.get(f.get("type"), f.get("type"))))
         if f.get("limitLiters"):
-            label += f" (лимит {f['limitLiters']} л)"
+            label += f" (лимит {escape(str(f['limitLiters']))} л)"
         labels.append(label)
     fuels_text = ", ".join(labels) if labels else "топливо"
 
@@ -145,8 +153,7 @@ def format_resumption(st: dict) -> str:
     ops_line = f"\n👥 Заправились за последнее время: {ops}" if ops else ""
 
     return (
-        f"⛽ <b>{st.get('name') or 'Без названия'}</b>\n"
-        f"📍 {st.get('address') or '—'}\n"
+        f"{_format_header(st)}\n"
         f"🎉 Снова в наличии: {fuels_text}"
         f"{fuels_block}"
         f"{ops_line}\n"
@@ -165,7 +172,7 @@ def format_station_list(stations: list[dict], header: str) -> list[str]:
         return [f"{header}\n\nСвежих данных не найдено."]
 
     messages = []
-    chunk = [header, ""]
+    chunk = [header]
     chunk_len = len(header)
 
     for st in stations:

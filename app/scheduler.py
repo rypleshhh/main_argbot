@@ -54,37 +54,62 @@ async def _post_to_server(server: dict, path: str, payload: dict, timeout: int =
         log.exception("Не удалось отправить %s на %s (%s)", path, server["name"], server["url"])
 
 
+def _match_stations(sber_stations: dict, other_stations: list[dict], find_match) -> dict:
+    """{api_id: станция другого источника} по географической близости."""
+    matches = {}
+    for api_id, st in sber_stations.items():
+        location = st.get("location") or {}
+        match = find_match(location.get("lat"), location.get("lon"), other_stations)
+        if match:
+            matches[api_id] = match
+    return matches
+
+
 async def _build_tbank_matches(bbox: tuple, sber_stations: dict) -> dict:
     """Тянет T-Bank по тому же bbox и матчит с найденными станциями
     sberazs по географической близости. sberazs остаётся главным
     источником — это только вторичное подтверждение для карточки."""
     tbank_stations = await fetch_tbank_stations(bbox)
-    if not tbank_stations:
-        return {}
-
-    matches = {}
-    for api_id, st in sber_stations.items():
-        location = st.get("location") or {}
-        match = find_tbank_match(location.get("lat"), location.get("lon"), tbank_stations)
-        if match:
-            matches[api_id] = match
-    return matches
+    return _match_stations(sber_stations, tbank_stations, find_tbank_match) if tbank_stations else {}
 
 
 async def _build_gdebenz_matches(bbox: tuple, sber_stations: dict) -> dict:
     """Тянет gdebenz (краудсорсинг) по тому же bbox и матчит так же, как
     T-Bank — третье, самое слабое по надёжности мнение рядом с sberazs."""
     gdebenz_stations = await fetch_gdebenz_stations(bbox)
-    if not gdebenz_stations:
-        return {}
+    return _match_stations(sber_stations, gdebenz_stations, find_gdebenz_match) if gdebenz_stations else {}
 
-    matches = {}
-    for api_id, st in sber_stations.items():
-        location = st.get("location") or {}
-        match = find_gdebenz_match(location.get("lat"), location.get("lon"), gdebenz_stations)
-        if match:
-            matches[api_id] = match
-    return matches
+
+async def cross_validate(area: str, bbox: tuple, sber_stations: dict) -> tuple[dict, dict]:
+    """(tbank_matches, gdebenz_matches) для найденных станций. Ошибки
+    вторичных источников не роняют скан — просто пустой матч."""
+    if not sber_stations:
+        return {}, {}
+    if _bbox_too_large_for_secondary_sources(bbox):
+        # T-Bank/gdebenz — это geo-запрос по ВСЕЙ области целиком.
+        # На масштабе "вся страна одним bbox" gdebenz гарантированно
+        # отвечает 400 (область слишком большая) — незачем тратить
+        # время на 3 ретрая с задержкой ради заведомо провального
+        # запроса. Кросс-валидация тут просто пропускается —
+        # основные данные (наличие топлива) от этого не зависят,
+        # только текст уведомления не получит второе/третье мнение.
+        log.info(
+            "Область %s: bbox слишком большой (%.1f° x %.1f°) для T-Bank/gdebenz — пропускаю кросс-валидацию",
+            area, bbox[2] - bbox[0], bbox[3] - bbox[1],
+        )
+        return {}, {}
+
+    try:
+        tbank_matches = await _build_tbank_matches(bbox, sber_stations)
+    except Exception:
+        log.exception("Ошибка матчинга T-Bank для области %s", area)
+        tbank_matches = {}
+    try:
+        gdebenz_matches = await _build_gdebenz_matches(bbox, sber_stations)
+    except Exception:
+        log.exception("Ошибка матчинга gdebenz для области %s", area)
+        gdebenz_matches = {}
+    return tbank_matches, gdebenz_matches
 
 
 async def _push_notifications(updates: list[dict]):
@@ -201,7 +226,7 @@ async def _full_sweep_cycle(client: StationsClient):
             if not found_batch:
                 return
             batch_updates = storage.upsert_stations_and_get_updates(
-                area, found_batch, MAX_PAYMENT_AGE_MINUTES, {}, {}
+                area, found_batch, MAX_PAYMENT_AGE_MINUTES, {}, {}, finish_first_scan=False,
             )
             await _push_notifications(batch_updates)
             await _push_station_catalog_partial(area, found_batch)
@@ -212,35 +237,12 @@ async def _full_sweep_cycle(client: StationsClient):
             log.exception("Ошибка сканирования области %s", area)
             continue
 
-        if _bbox_too_large_for_secondary_sources(bbox):
-            # T-Bank/gdebenz — это geo-запрос по ВСЕЙ области целиком.
-            # На масштабе "вся страна одним bbox" gdebenz гарантированно
-            # отвечает 400 (область слишком большая) — незачем тратить
-            # время на 3 ретрая с задержкой ради заведомо провального
-            # запроса. Кросс-валидация тут просто пропускается —
-            # основные данные (наличие топлива) от этого не зависят,
-            # только текст уведомления не получит второе/третье мнение.
+        tbank_matches, gdebenz_matches = await cross_validate(area, bbox, found)
+        if tbank_matches or gdebenz_matches:
             log.info(
-                "Область %s: bbox слишком большой (%.1f° x %.1f°) для T-Bank/gdebenz — пропускаю кросс-валидацию",
-                area, bbox[2] - bbox[0], bbox[3] - bbox[1],
+                "Область %s: сматчено с T-Bank %d, с gdebenz %d станций",
+                area, len(tbank_matches), len(gdebenz_matches),
             )
-            tbank_matches, gdebenz_matches = {}, {}
-        else:
-            try:
-                tbank_matches = await _build_tbank_matches(bbox, found)
-                if tbank_matches:
-                    log.info("Область %s: сматчено %d станций с T-Bank", area, len(tbank_matches))
-            except Exception:
-                log.exception("Ошибка матчинга T-Bank для области %s", area)
-                tbank_matches = {}
-
-            try:
-                gdebenz_matches = await _build_gdebenz_matches(bbox, found)
-                if gdebenz_matches:
-                    log.info("Область %s: сматчено %d станций с gdebenz", area, len(gdebenz_matches))
-            except Exception:
-                log.exception("Ошибка матчинга gdebenz для области %s", area)
-                gdebenz_matches = {}
 
         # Финальный проход по всему накопленному — досчитывает то, что не
         # попало в промежуточные батчи (последний неполный батч), и
@@ -321,15 +323,7 @@ async def _targeted_cycle(client: StationsClient):
         if not found:
             continue
 
-        try:
-            tbank_matches = await _build_tbank_matches(bbox, found)
-        except Exception:
-            tbank_matches = {}
-        try:
-            gdebenz_matches = await _build_gdebenz_matches(bbox, found)
-        except Exception:
-            gdebenz_matches = {}
-
+        tbank_matches, gdebenz_matches = await cross_validate(area, bbox, found)
         updates = storage.upsert_stations_and_get_updates(
             area, found, MAX_PAYMENT_AGE_MINUTES, tbank_matches, gdebenz_matches
         )
@@ -350,6 +344,7 @@ async def run_scheduler(client: StationsClient):
                 await _targeted_cycle(client)
             else:
                 await _full_sweep_cycle(client)
+            storage.prune_pending_notifications()
         except Exception:
             log.exception("Ошибка в цикле сканирования")
         await asyncio.sleep(SCAN_INTERVAL_MINUTES * 60)

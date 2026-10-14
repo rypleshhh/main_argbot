@@ -6,9 +6,10 @@
 """
 
 import logging
-import math
 
 import aiohttp
+
+from app.geo import find_nearest
 
 log = logging.getLogger(__name__)
 
@@ -49,35 +50,6 @@ async def fetch_tbank_stations(bbox: tuple[float, float, float, float]) -> list[
         return []
 
 
-def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    r = 6371000
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
-    return 2 * r * math.asin(math.sqrt(a))
-
-
-def build_tbank_index(tbank_stations: list[dict]) -> list[dict]:
-    """Просто возвращает список как есть — индекс не строим, т.к.
-    станций в одном bbox обычно немного (десятки-сотни), полный перебор
-    достаточно быстрый и не требует доп. зависимостей вроде scipy."""
-    return tbank_stations
-
-
 def find_tbank_match(sber_lat: float, sber_lon: float, tbank_stations: list[dict]) -> dict | None:
     """Ищет ближайшую станцию T-Bank в пределах MATCH_DISTANCE_M."""
-    if sber_lat is None or sber_lon is None:
-        return None
-
-    best = None
-    best_dist = MATCH_DISTANCE_M
-    for t in tbank_stations:
-        t_lat, t_lon = t.get("lat"), t.get("lon")
-        if t_lat is None or t_lon is None:
-            continue
-        dist = _haversine_m(sber_lat, sber_lon, t_lat, t_lon)
-        if dist < best_dist:
-            best = t
-            best_dist = dist
-    return best
+    return find_nearest(sber_lat, sber_lon, tbank_stations, MATCH_DISTANCE_M)

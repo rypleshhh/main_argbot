@@ -8,9 +8,10 @@
 
 import asyncio
 import logging
-import math
 
 import aiohttp
+
+from app.geo import find_nearest
 
 log = logging.getLogger(__name__)
 
@@ -71,27 +72,5 @@ async def fetch_gdebenz_stations(bbox: tuple[float, float, float, float]) -> lis
     return []
 
 
-def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    r = 6371000
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
-    return 2 * r * math.asin(math.sqrt(a))
-
-
 def find_gdebenz_match(sber_lat: float, sber_lon: float, gdebenz_stations: list[dict]) -> dict | None:
-    if sber_lat is None or sber_lon is None:
-        return None
-
-    best = None
-    best_dist = MATCH_DISTANCE_M
-    for g in gdebenz_stations:
-        g_lat, g_lon = g.get("lat"), g.get("lon")
-        if g_lat is None or g_lon is None:
-            continue
-        dist = _haversine_m(sber_lat, sber_lon, g_lat, g_lon)
-        if dist < best_dist:
-            best = g
-            best_dist = dist
-    return best
+    return find_nearest(sber_lat, sber_lon, gdebenz_stations, MATCH_DISTANCE_M)

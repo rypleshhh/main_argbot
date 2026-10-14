@@ -84,20 +84,62 @@ def _fetch_stations_sync(session: requests.Session, bbox_cell) -> list:
         raise InvalidResponse(str(e)) from e
 
 
+def _needs_cookie_refresh(exc: Exception) -> bool:
+    if isinstance(exc, InvalidResponse):
+        return True
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        return exc.response.status_code in (401, 403)
+    return False
+
+
 class StationsClient:
-    """Держит сессию с куками, умеет сама обновлять их при 401/403."""
+    """Держит сессию с куками, умеет сама обновлять их при 401/403.
+
+    Один клиент параллельно используют планировщик и опрос команд —
+    обновление кук идёт под замком, чтобы при протухшей сессии не
+    поднималось несколько браузеров разом."""
 
     def __init__(self):
         self._session = requests.Session()
         self._cookies_ready = False
+        # Растёт при каждом обновлении кук — по нему понимаем, что пока
+        # мы ждали замок, куки уже обновил кто-то другой.
+        self._cookie_generation = 0
+        self._cookie_lock = asyncio.Lock()
 
     async def _ensure_cookies(self):
-        if not self._cookies_ready:
-            log.info("Получаю антибот-куки через браузер...")
-            cookies = await get_cookies_via_browser()
-            self._session.cookies.clear()
-            self._session.cookies.update(cookies)
-            self._cookies_ready = True
+        if self._cookies_ready:
+            return
+        async with self._cookie_lock:
+            if not self._cookies_ready:
+                await self._load_cookies()
+
+    async def _refresh_cookies(self, stale_generation: int):
+        async with self._cookie_lock:
+            if self._cookie_generation != stale_generation:
+                return
+            await self._load_cookies()
+
+    async def _load_cookies(self):
+        log.info("Получаю антибот-куки через браузер...")
+        cookies = await get_cookies_via_browser()
+        self._session.cookies.clear()
+        self._session.cookies.update(cookies)
+        self._cookies_ready = True
+        self._cookie_generation += 1
+
+    async def _fetch_cell(self, cell) -> list:
+        """Запрос одной ячейки; при протухших куках — обновляет их и
+        повторяет один раз. Прочие ошибки пробрасывает."""
+        generation = self._cookie_generation
+        try:
+            return await asyncio.to_thread(_fetch_stations_sync, self._session, cell)
+        except (requests.HTTPError, InvalidResponse) as e:
+            if not _needs_cookie_refresh(e):
+                raise
+        log.warning("Куки истекли/невалидны, обновляю сессию...")
+        await self._refresh_cookies(generation)
+        return await asyncio.to_thread(_fetch_stations_sync, self._session, cell)
 
     async def collect_area(
         self,
@@ -129,25 +171,13 @@ class StationsClient:
 
         for i, cell in enumerate(grid):
             try:
-                stations = await asyncio.to_thread(_fetch_stations_sync, self._session, cell)
-            except (requests.HTTPError, InvalidResponse) as e:
-                needs_refresh = isinstance(e, InvalidResponse)
-                if isinstance(e, requests.HTTPError):
-                    status = e.response.status_code if e.response is not None else None
-                    needs_refresh = status in (401, 403)
-
-                if needs_refresh:
-                    log.warning("Куки истекли/невалидны, обновляю сессию...")
-                    self._cookies_ready = False
-                    await self._ensure_cookies()
-                    try:
-                        stations = await asyncio.to_thread(_fetch_stations_sync, self._session, cell)
-                    except (requests.HTTPError, InvalidResponse) as e2:
-                        log.error("Повторная ошибка на ячейке %s: %s", cell, e2)
-                        continue
-                else:
-                    log.error("Ошибка на ячейке %s: %s", cell, e)
-                    continue
+                stations = await self._fetch_cell(cell)
+            except (requests.RequestException, InvalidResponse) as e:
+                # Включая таймауты/обрывы соединения — одна плохая ячейка
+                # не должна обрывать скан всей области.
+                log.error("Ошибка на ячейке %s: %s", cell, e)
+                await asyncio.sleep(REQUEST_DELAY_SEC)
+                continue
 
             for st in stations:
                 api_id = st.get("id")

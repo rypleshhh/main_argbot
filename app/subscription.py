@@ -10,7 +10,7 @@
 """
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from app.config import PAYWALL_ENABLED, SUBSCRIPTION_COST_COINS, SUBSCRIPTION_DAYS, TRIAL_HOURS
@@ -37,7 +37,14 @@ class AccessStatus:
 
 
 def _now() -> datetime:
-    return datetime.utcnow()
+    """Текущее время в UTC, наивное — в таком виде даты хранятся в БД."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def to_utc_iso(dt: Optional[datetime]) -> Optional[str]:
+    """Наивный UTC -> ISO с явным '+00:00'. Без пояса JS (new Date(...))
+    читает строку как ЛОКАЛЬНОЕ время и сдвигает отображение."""
+    return dt.replace(tzinfo=timezone.utc).isoformat() if dt else None
 
 
 def _parse(value: Optional[str]) -> Optional[datetime]:
@@ -51,8 +58,7 @@ def _format(dt: datetime) -> str:
 def _to_display(dt: datetime) -> str:
     """UTC (наивный datetime) -> строка в московском времени, как везде
     в проекте (см. app.formatting.DISPLAY_TZ)."""
-    from datetime import timezone as _tz
-    dt_utc = dt.replace(tzinfo=_tz.utc)
+    dt_utc = dt.replace(tzinfo=timezone.utc)
     return dt_utc.astimezone(DISPLAY_TZ).strftime("%d.%m.%Y %H:%M")
 
 
@@ -152,14 +158,6 @@ def fmt_remaining(delta: timedelta) -> str:
     if not days and minutes:
         parts.append(f"{minutes} мин")
     return " ".join(parts) if parts else "меньше минуты"
-
-
-def trial_remaining_text(status: AccessStatus) -> str:
-    """Удобный хелпер для внешнего кода (light_bot.py) — не лезет во
-    внутренности модуля напрямую."""
-    if not status.trial_ends_at:
-        return ""
-    return fmt_remaining(status.trial_ends_at - _now())
 
 
 def format_status_text(chat_id: int, status: AccessStatus) -> str:
