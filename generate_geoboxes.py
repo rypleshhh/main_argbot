@@ -104,6 +104,12 @@ def main():
             print(f"  ошибка: {e}", file=sys.stderr)
             bbox = None
 
+        if bbox is not None and bbox[2] - bbox[0] > 180:
+            # Регион пересекает 180-й меридиан (Чукотка) — Nominatim
+            # отдаёт -180..180, а это скан всего земного шара по долготе.
+            print(f"  bbox пересекает 180-й меридиан ({bbox}) — задайте его вручную", file=sys.stderr)
+            bbox = None
+
         if bbox is None:
             failed.append(region)
         else:

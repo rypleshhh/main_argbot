@@ -9,8 +9,11 @@
 """
 
 import asyncio
+import hmac
 import json
 import logging
+from html import escape
+from typing import Optional
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -37,6 +40,17 @@ log = logging.getLogger(__name__)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+# Ссылки на фоновые задачи — asyncio держит на задачи только слабые
+# ссылки, без этого незавершённую задачу может собрать GC.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
 
 
 # ---------------------------------------------------------------------
@@ -335,11 +349,20 @@ def _notify_hint_suffix(chat_id: int) -> str:
     )
 
 
+def _resolve_area(name: str) -> Optional[str]:
+    """Каноническое название города или None, если такого нет. Пока
+    скрапер не прислал список городов (known_areas пуст), сверять не с
+    чем — пропускаем название как есть."""
+    if not storage.get_known_areas():
+        return name
+    return storage.find_known_area(name)
+
+
 async def _start_scan(chat_id: int, area: str):
     command_id = storage.add_command(chat_id, area)
     log.info("Создана команда id=%s chat_id=%s area=%s", command_id, chat_id, area)
     await bot.send_message(chat_id, f"Принял запрос по «{area}», жду ответа от сервера-скрапера...")
-    asyncio.create_task(_watch_command_timeout(command_id, chat_id, area))
+    _spawn(_watch_command_timeout(command_id, chat_id, area))
 
 
 @dp.callback_query(F.data.startswith("scan:"))
@@ -409,7 +432,10 @@ async def cmd_scan_city(message: Message):
         await message.answer("Укажите город: /scan_city название (или используйте /cities для выбора кнопкой)")
         return
 
-    area = parts[1].strip()
+    area = _resolve_area(parts[1])
+    if area is None:
+        await message.answer(f"Город «{parts[1].strip()}» не настроен. Список городов — /cities")
+        return
     await _start_scan(message.chat.id, area)
 
 
@@ -448,9 +474,21 @@ CATEGORY_ALIASES = {
 async def cmd_subscribe(message: Message):
     if not await _require_access(message, message.chat.id):
         return
-    parts = message.text.split(maxsplit=2)
-    area = parts[1].strip() if len(parts) > 1 else "all"
-    category = CATEGORY_ALIASES.get(parts[2].strip().lower(), "all") if len(parts) > 2 else "all"
+    # /subscribe [город из нескольких слов] [категория] — категорию
+    # узнаём по последнему слову, всё остальное считаем названием города
+    # (раньше "Нижний Новгород" превращался в город "Нижний").
+    parts = message.text.split(maxsplit=1)
+    words = parts[1].split() if len(parts) > 1 else []
+    category = "all"
+    if words and words[-1].lower() in CATEGORY_ALIASES:
+        category = CATEGORY_ALIASES[words.pop().lower()]
+    area = " ".join(words) or "all"
+    if area != "all":
+        resolved = _resolve_area(area)
+        if resolved is None:
+            await message.answer(f"Город «{area}» не настроен. Список городов — /cities")
+            return
+        area = resolved
 
     storage.add_subscriber(message.chat.id, area, category)
     area_label = "все области" if area == "all" else area
@@ -498,7 +536,8 @@ async def cmd_unknown(message: Message):
 def _check_auth(request: web.Request) -> bool:
     if not API_TOKEN:
         return True
-    return request.headers.get("Authorization") == f"Bearer {API_TOKEN}"
+    received = request.headers.get("Authorization", "")
+    return hmac.compare_digest(received.encode(), f"Bearer {API_TOKEN}".encode())
 
 
 @web.middleware
@@ -528,7 +567,7 @@ async def handle_command_result(request: web.Request):
         return web.json_response({"error": "unknown command_id"}, status=404)
 
     chat_id = cmd["chat_id"]
-    for chunk in format_station_list(stations, f"🔎 Результаты: {area}"):
+    for chunk in format_station_list(stations, f"🔎 Результаты: {escape(area)}"):
         try:
             await bot.send_message(chat_id, chunk, parse_mode="HTML")
         except Exception:
@@ -546,7 +585,14 @@ async def handle_command_result(request: web.Request):
 async def handle_notifications(request: web.Request):
     data = await request.json()
     updates = data.get("updates", [])
+    # Рассылка может занять дольше таймаута запроса у скрапера (30 сек) —
+    # отвечаем сразу, шлём в фоне.
+    if updates:
+        _spawn(_deliver_notifications(updates))
+    return web.json_response({"status": "ok"})
 
+
+async def _deliver_notifications(updates: list[dict]):
     for upd in updates:
         area = upd.get("area", "")
         station_id = upd.get("api_id", "")
@@ -573,15 +619,13 @@ async def handle_notifications(request: web.Request):
         if not chat_ids:
             continue
 
-        text = f"🆕 Топливо снова в наличии ({area}):\n\n{format_resumption(upd)}"
+        text = f"🆕 Топливо снова в наличии ({escape(area)}):\n\n{format_resumption(upd)}"
         for chat_id in chat_ids:
             try:
                 await bot.send_message(chat_id, text, parse_mode="HTML")
             except Exception:
                 log.exception("Не удалось отправить уведомление chat_id=%s", chat_id)
             await asyncio.sleep(0.05)
-
-    return web.json_response({"status": "ok"})
 
 
 async def handle_areas(request: web.Request):
@@ -657,11 +701,23 @@ async def run_api_server():
         await asyncio.sleep(3600)
 
 
+async def cleanup_loop():
+    while True:
+        try:
+            storage.prune_command_results()
+        except Exception:
+            log.exception("Ошибка очистки старых результатов команд")
+        await asyncio.sleep(6 * 3600)
+
+
 async def main():
     storage.init_db()
+    if not API_TOKEN:
+        log.warning("API_TOKEN не задан — HTTP API для скрапера открыт без авторизации")
     tasks = [
         dp.start_polling(bot),
         run_api_server(),
+        cleanup_loop(),
     ]
     if PAYWALL_ENABLED:
         # Mini App есть только у платного бота — на бесплатном инстансе

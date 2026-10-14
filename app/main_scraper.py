@@ -13,7 +13,7 @@ from app.config import (
 )
 from app import storage
 from app.scraper import StationsClient
-from app.scheduler import run_scheduler, _build_tbank_matches, _build_gdebenz_matches, _push_notifications, _push_station_catalog, _headers_for
+from app.scheduler import run_scheduler, cross_validate, _push_notifications, _push_station_catalog, _headers_for
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -33,16 +33,7 @@ async def _fulfil_command(client: StationsClient, session: aiohttp.ClientSession
     else:
         try:
             found = await client.collect_area(bbox, STEP_LON, STEP_LAT)
-            try:
-                tbank_matches = await _build_tbank_matches(bbox, found)
-            except Exception:
-                log.exception("Ошибка матчинга T-Bank для команды %s", cmd["id"])
-                tbank_matches = {}
-            try:
-                gdebenz_matches = await _build_gdebenz_matches(bbox, found)
-            except Exception:
-                log.exception("Ошибка матчинга gdebenz для команды %s", cmd["id"])
-                gdebenz_matches = {}
+            tbank_matches, gdebenz_matches = await cross_validate(area, bbox, found)
             updates = storage.upsert_stations_and_get_updates(
                 area, found, MAX_PAYMENT_AGE_MINUTES, tbank_matches, gdebenz_matches
             )

@@ -340,8 +340,12 @@ async function refreshZoneEditor(modal) {
 
     content.querySelectorAll("[data-remove-station]").forEach(function (b) {
       b.addEventListener("click", async function () {
-        await api("/zones/" + editingZoneId + "/stations/" + encodeURIComponent(b.dataset.removeStation), { method: "DELETE" });
-        refreshZoneEditor(modal);
+        try {
+          await api("/zones/" + editingZoneId + "/stations/" + encodeURIComponent(b.dataset.removeStation), { method: "DELETE" });
+          refreshZoneEditor(modal);
+        } catch (e) {
+          alert(e.message);
+        }
       });
     });
     content.querySelector("#close-modal").addEventListener("click", function () {
@@ -565,8 +569,12 @@ async function renderAlerts() {
     if (unsubBtn) {
       unsubBtn.addEventListener("click", async function () {
         if (!confirm("Отписаться от всех подписок по области? Зоны это не затронет.")) return;
-        await api("/subscriptions", { method: "DELETE" });
-        renderAlerts();
+        try {
+          await api("/subscriptions", { method: "DELETE" });
+          renderAlerts();
+        } catch (e) {
+          alert(e.message);
+        }
       });
     }
   } catch (e) {

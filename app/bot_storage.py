@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -172,24 +173,6 @@ def init_db():
         conn.commit()
 
 
-def get_last_notification_id() -> int:
-    with closing(_connect()) as conn:
-        row = conn.execute(
-            "SELECT value FROM poll_state WHERE key = 'last_notification_id'"
-        ).fetchone()
-    return int(row["value"]) if row else 0
-
-
-def set_last_notification_id(value: int):
-    with closing(_connect()) as conn:
-        conn.execute(
-            "INSERT INTO poll_state (key, value) VALUES ('last_notification_id', ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = ?",
-            (str(value), str(value)),
-        )
-        conn.commit()
-
-
 def sync_known_areas(areas: list[str]):
     """Обновляет список городов, которые прислал скрапер (INSERT OR IGNORE,
     чтобы id городов не менялись между синхронизациями)."""
@@ -203,6 +186,16 @@ def get_known_areas() -> list[dict]:
     with closing(_connect()) as conn:
         rows = conn.execute("SELECT id, area FROM known_areas ORDER BY area").fetchall()
     return [dict(r) for r in rows]
+
+
+def find_known_area(name: str) -> Optional[str]:
+    """Каноническое название города из known_areas без учёта регистра
+    ('москва' -> 'Москва'), либо None, если такого нет."""
+    wanted = name.strip().casefold()
+    for a in get_known_areas():
+        if a["area"].casefold() == wanted:
+            return a["area"]
+    return None
 
 
 def get_area_by_id(area_id: int) -> Optional[str]:
@@ -222,11 +215,17 @@ def add_command(chat_id: int, area: str, session_id: Optional[int] = None) -> in
 
 
 def pop_pending_commands() -> list[dict]:
-    """Отдаёт все команды со статусом pending и сразу помечает их sent."""
+    """Отдаёт все команды со статусом pending и сразу помечает их sent.
+    Помечаем именно отданные id — команда, добавленная между SELECT и
+    UPDATE, не должна стать 'sent', так и не уйдя скраперу."""
     with closing(_connect()) as conn:
-        rows = conn.execute("SELECT * FROM commands WHERE status = 'pending'").fetchall()
-        conn.execute("UPDATE commands SET status = 'sent' WHERE status = 'pending'")
-        conn.commit()
+        rows = conn.execute("SELECT * FROM commands WHERE status = 'pending' ORDER BY id").fetchall()
+        if rows:
+            conn.executemany(
+                "UPDATE commands SET status = 'sent' WHERE id = ?",
+                [(r["id"],) for r in rows],
+            )
+            conn.commit()
     return [dict(r) for r in rows]
 
 
@@ -567,9 +566,13 @@ def get_zone(chat_id: int, zone_id: int) -> Optional[dict]:
 def delete_zone(chat_id: int, zone_id: int) -> bool:
     with closing(_connect()) as conn:
         cur = conn.execute("DELETE FROM zones WHERE id = ? AND chat_id = ?", (zone_id, chat_id))
-        conn.execute("DELETE FROM zone_stations WHERE zone_id = ?", (zone_id,))
+        deleted = cur.rowcount > 0
+        # Станции чистим только если зона реально принадлежала chat_id —
+        # иначе запрос с чужим zone_id опустошал бы чужую зону.
+        if deleted:
+            conn.execute("DELETE FROM zone_stations WHERE zone_id = ?", (zone_id,))
         conn.commit()
-        return cur.rowcount > 0
+        return deleted
 
 
 def add_station_to_zone(chat_id: int, zone_id: int, station_id: str) -> bool:
@@ -675,12 +678,23 @@ def get_session_commands(session_id: int) -> list[dict]:
 
 
 def save_command_result(command_id: int, area: str, stations: list[dict]):
-    import json as _json
     with closing(_connect()) as conn:
         conn.execute(
             "INSERT INTO command_results (command_id, area, stations_json) VALUES (?, ?, ?) "
             "ON CONFLICT(command_id) DO UPDATE SET area=excluded.area, stations_json=excluded.stations_json",
-            (command_id, area, _json.dumps(stations, ensure_ascii=False)),
+            (command_id, area, json.dumps(stations, ensure_ascii=False)),
+        )
+        conn.commit()
+
+
+def prune_command_results(max_age_days: int = 2):
+    """Сырые результаты сканов нужны Mini App только пока фронтенд
+    опрашивает сессию (минуты) — старые чистим, иначе таблица растёт
+    на полный JSON станций с каждым сканом."""
+    with closing(_connect()) as conn:
+        conn.execute(
+            "DELETE FROM command_results WHERE created_at < datetime('now', ?)",
+            (f"-{max_age_days} days",),
         )
         conn.commit()
 

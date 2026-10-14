@@ -239,6 +239,7 @@ def get_fuel_since_map(api_id: str, fuels_json: Optional[str], conn=None) -> dic
 def upsert_stations_and_get_updates(
     area: str, stations: dict, max_age_minutes: int,
     tbank_matches: Optional[dict] = None, gdebenz_matches: Optional[dict] = None,
+    finish_first_scan: bool = True,
 ) -> list[dict]:
     """
     Обновляет БД станциями из свежего скана этой области — не важно,
@@ -256,6 +257,17 @@ def upsert_stations_and_get_updates(
     На первом скане области уведомления не генерируются (только
     наполняем базу/историю), чтобы не вываливать пользователю всю
     историю сразу.
+
+    finish_first_scan=False — для промежуточных батчей долгого скана:
+    область не помечается просканированной, пока не придёт финальный
+    вызов по всей области. Иначе первый же батч закрыл бы "первый скан",
+    и все следующие батчи того же прохода засыпали бы подписчиков
+    уведомлениями по каждой ещё не виденной станции с топливом.
+
+    В историю пишется только СМЕНА статуса топлива (а не каждый скан):
+    сравнение 'было / стало' и тайм-лог 'доступно с...' от этого не
+    меняются, а таблица не растёт на (станции x виды топлива) строк
+    каждые SCAN_INTERVAL_MINUTES.
     """
     first_scan = is_first_scan(area)
     updates_to_notify = []
@@ -291,10 +303,11 @@ def upsert_stations_and_get_updates(
                             "category": FUEL_CATEGORIES.get(ftype, "other"),
                         })
 
-                    conn.execute(
-                        "INSERT INTO fuel_history (api_id, fuel_type, status, scanned_at) VALUES (?, ?, ?, ?)",
-                        (api_id, ftype, now_status, datetime.now(timezone.utc).isoformat()),
-                    )
+                    if now_status != prev_status:
+                        conn.execute(
+                            "INSERT INTO fuel_history (api_id, fuel_type, status, scanned_at) VALUES (?, ?, ?, ?)",
+                            (api_id, ftype, now_status, datetime.now(timezone.utc).isoformat()),
+                        )
             else:
                 # Ненадёжный скан — снимок в stations ниже всё равно
                 # обновится по остальным полям, но fuels_json/status
@@ -346,7 +359,7 @@ def upsert_stations_and_get_updates(
 
         conn.commit()
 
-    if first_scan:
+    if first_scan and finish_first_scan:
         mark_area_scanned(area)
 
     return updates_to_notify
@@ -362,22 +375,23 @@ def get_fresh_stations(area: str, max_age_minutes: int) -> list[dict]:
     MIN_OPERATIONS_COUNT недавних оплат И хотя бы одним видом топлива
     в наличии прямо сейчас (для /scan_city — выдаём только то, что
     реально есть, а не всё подряд)."""
-    with closing(_connect()) as conn:
-        rows = conn.execute("SELECT * FROM stations WHERE area = ?", (area,)).fetchall()
-
     result = []
-    for r in rows:
-        if not is_recent(r["last_payment_at"], max_age_minutes):
-            continue
-        if (r["operations_count"] or 0) < MIN_OPERATIONS_COUNT:
-            continue
-        if not _has_available_fuel(r["fuels_json"]):
-            continue
+    with closing(_connect()) as conn:
+        rows = conn.execute(
+            "SELECT * FROM stations WHERE area = ? AND operations_count >= ?",
+            (area, MIN_OPERATIONS_COUNT),
+        ).fetchall()
 
-        d = dict(r)
-        since_map = get_fuel_since_map(d["api_id"], d["fuels_json"])
-        d["fuel_since_json"] = json.dumps(since_map, ensure_ascii=False)
-        result.append(d)
+        for r in rows:
+            if not is_recent(r["last_payment_at"], max_age_minutes):
+                continue
+            if not _has_available_fuel(r["fuels_json"]):
+                continue
+
+            d = dict(r)
+            since_map = get_fuel_since_map(d["api_id"], d["fuels_json"], conn=conn)
+            d["fuel_since_json"] = json.dumps(since_map, ensure_ascii=False)
+            result.append(d)
 
     return result
 
@@ -391,10 +405,22 @@ def get_notifications_after(after_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def get_areas() -> list[str]:
+def get_max_notification_id() -> int:
     with closing(_connect()) as conn:
-        rows = conn.execute("SELECT DISTINCT area FROM stations").fetchall()
-    return [r["area"] for r in rows]
+        row = conn.execute("SELECT MAX(id) AS max_id FROM pending_notifications").fetchone()
+    return row["max_id"] or 0
+
+
+def prune_pending_notifications(max_age_days: int = 3):
+    """pending_notifications читает только моно-режим (app/main.py), и
+    только свежие записи — на сервере-скрапере таблица иначе растёт
+    бесконечно."""
+    with closing(_connect()) as conn:
+        conn.execute(
+            "DELETE FROM pending_notifications WHERE created_at < datetime('now', ?)",
+            (f"-{max_age_days} days",),
+        )
+        conn.commit()
 
 
 def get_last_full_sweep() -> Optional[datetime]:

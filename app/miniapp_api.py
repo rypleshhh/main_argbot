@@ -47,6 +47,10 @@ log = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "miniapp_static"
 
+# Сколько станций можно добавить в зону одним запросом «Добавить выбранные»
+# (поиск по каталогу и так отдаёт не больше 100).
+MAX_BULK_STATIONS = 500
+
 
 # ---------------------------------------------------------------------
 # Middlewares: CORS (на случай, если фронтенд когда-нибудь будет не на
@@ -153,7 +157,10 @@ async def handle_scan(request: web.Request):
     zone_id = body.get("zone_id")
 
     if area:
-        areas = [area]
+        known = storage.find_known_area(area) if isinstance(area, str) else None
+        if known is None:
+            return web.json_response({"error": "unknown_area"}, status=400)
+        areas = [known]
         zid = None
     elif zone_id is not None:
         try:
@@ -298,8 +305,9 @@ async def handle_zone_add_station(request: web.Request):
         return err
     body = await _read_json(request)
     station_id = body.get("station_id")
-    if not station_id:
+    if not isinstance(station_id, (str, int)) or isinstance(station_id, bool) or not str(station_id):
         return web.json_response({"error": "station_id is required"}, status=400)
+    station_id = str(station_id)
     if not storage.add_station_to_zone(chat_id, zone_id, station_id):
         return web.json_response({"error": "zone not found"}, status=404)
     return web.json_response({"status": "ok"}, status=201)
@@ -315,6 +323,11 @@ async def handle_zone_add_stations_bulk(request: web.Request):
     body = await _read_json(request)
     station_ids = body.get("station_ids")
     if not isinstance(station_ids, list) or not station_ids:
+        return web.json_response({"error": "station_ids (non-empty list) is required"}, status=400)
+    if len(station_ids) > MAX_BULK_STATIONS:
+        return web.json_response({"error": f"too many station_ids (max {MAX_BULK_STATIONS})"}, status=400)
+    station_ids = [str(s) for s in station_ids if isinstance(s, (str, int)) and not isinstance(s, bool) and str(s)]
+    if not station_ids:
         return web.json_response({"error": "station_ids (non-empty list) is required"}, status=400)
     added = storage.add_stations_to_zone_bulk(chat_id, zone_id, station_ids)
     if not added:
@@ -349,8 +362,12 @@ async def handle_add_subscription(request: web.Request):
     body = await _read_json(request)
     area = body.get("area") or "all"
     category = body.get("category") or "all"
-    if category not in CATEGORY_LABELS:
+    if not isinstance(category, str) or category not in CATEGORY_LABELS:
         return web.json_response({"error": "bad category", "allowed": list(CATEGORY_LABELS)}, status=400)
+    if area != "all":
+        area = storage.find_known_area(area) if isinstance(area, str) else None
+        if area is None:
+            return web.json_response({"error": "unknown_area"}, status=400)
     storage.add_subscriber(chat_id, area, category)
     return web.json_response({"status": "ok"}, status=201)
 
@@ -372,8 +389,8 @@ async def handle_tariff(request: web.Request):
         "has_access": status.has_access,
         "on_trial": status.on_trial,
         "paid_active": status.paid_active,
-        "trial_ends_at": status.trial_ends_at.isoformat() if status.trial_ends_at else None,
-        "paid_until": status.paid_until.isoformat() if status.paid_until else None,
+        "trial_ends_at": subscription.to_utc_iso(status.trial_ends_at),
+        "paid_until": subscription.to_utc_iso(status.paid_until),
         "coins": status.coins,
         "subscription_days": SUBSCRIPTION_DAYS,
         "subscription_cost_coins": SUBSCRIPTION_COST_COINS,
@@ -391,7 +408,7 @@ async def handle_tariff_purchase(request: web.Request):
         )
     return web.json_response({
         "status": "ok",
-        "paid_until": status.paid_until.isoformat() if status.paid_until else None,
+        "paid_until": subscription.to_utc_iso(status.paid_until),
     })
 
 
